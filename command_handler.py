@@ -226,11 +226,11 @@ For support, contact @DecentralizedJM"""
         color = "🟢" if rate >= 0 else "🔴"
         bias = "Positive (Longs Pay Shorts)" if rate >= 0 else "Negative (Shorts Pay Longs)"
         
-        # Format next funding time in IST
+        # Format next funding time in IST (DD/MM/YY H:M:S format)
         if next_funding:
             dt = datetime.fromtimestamp(next_funding / 1000, tz=timezone.utc)
             dt_ist = dt + timedelta(hours=5, minutes=30)
-            next_time_str = dt_ist.strftime('%d %b, %I:%M %p IST')
+            next_time_str = dt_ist.strftime('%d/%m/%y %H:%M:%S')
         else:
             next_time_str = "Unknown"
         
@@ -253,7 +253,7 @@ For support, contact @DecentralizedJM"""
             year = int(date_str[4:6]) + 2000  # Convert YY to YYYY
             
             target_date = datetime(year, month, day, tzinfo=timezone.utc)
-            date_display = target_date.strftime('%d %b %Y')
+            date_display = target_date.strftime('%d/%m/%y')
             
             # Check if date is in the future
             if target_date.date() > datetime.now(timezone.utc).date():
@@ -316,10 +316,10 @@ For support, contact @DecentralizedJM"""
                     total_rate += rate
                     timestamp = int(record.get("fundingRateTimestamp", 0))
                     
-                    # Format time in IST
+                    # Format time in IST (DD/MM/YY H:M:S format)
                     dt = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
                     dt_ist = dt + timedelta(hours=5, minutes=30)
-                    time_str = dt_ist.strftime('%I:%M %p IST')
+                    time_str = dt_ist.strftime('%d/%m/%y %H:%M:%S')
                     
                     # Emoji based on rate
                     emoji = "🟢" if rate >= 0 else "🔴"
