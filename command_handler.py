@@ -9,6 +9,7 @@ Commands:
 - /funding - Show top 10 extreme funding rates
 - /funding <SYMBOL> - Show current funding rate for a symbol
 - /funding <SYMBOL> <DDMMYY> - Show historical funding rates for a symbol on a specific date
+- /funding <SYMBOL> <DDMMYY> <HH:MM:SS> - Show funding rate for specific time (or next settlement)
 """
 
 import asyncio
@@ -145,7 +146,11 @@ For support, contact @DecentralizedJM"""
                 if len(parts) > 2:
                     date_str = parts[2]
                     if len(date_str) == 6 and date_str.isdigit():
-                        await self.send_historical_funding(chat_id, symbol, date_str)
+                        # Check if time is also provided (HH:MM:SS format)
+                        time_str = None
+                        if len(parts) > 3:
+                            time_str = parts[3]
+                        await self.send_historical_funding(chat_id, symbol, date_str, time_str)
                     else:
                         await self.send_message(chat_id, "❌ Invalid date format. Use DDMMYY (e.g., 010126 for 01 Jan 2026)")
                 else:
@@ -244,8 +249,8 @@ For support, contact @DecentralizedJM"""
         
         await self.send_message(chat_id, message)
     
-    async def send_historical_funding(self, chat_id: int, symbol: str, date_str: str):
-        """Send historical funding rates for a specific symbol and date"""
+    async def send_historical_funding(self, chat_id: int, symbol: str, date_str: str, time_str: str = None):
+        """Send historical funding rates for a specific symbol and date (optionally filtered by time)"""
         try:
             # Parse and validate date (DDMMYY format)
             day = int(date_str[0:2])
@@ -263,6 +268,29 @@ For support, contact @DecentralizedJM"""
         except (ValueError, IndexError):
             await self.send_message(chat_id, "❌ Invalid date format. Use DDMMYY (e.g., 010126 for 01 Jan 2026)")
             return
+        
+        # Parse time if provided (HH:MM:SS format)
+        target_time_ist = None
+        if time_str:
+            try:
+                # Parse HH:MM:SS format
+                time_parts = time_str.split(':')
+                if len(time_parts) >= 2:
+                    hour = int(time_parts[0])
+                    minute = int(time_parts[1])
+                    second = int(time_parts[2]) if len(time_parts) > 2 else 0
+                    
+                    # Create target datetime in IST
+                    target_time_ist = datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+                    # Convert IST to UTC (subtract 5:30)
+                    target_time_utc = target_time_ist - timedelta(hours=5, minutes=30)
+                    target_timestamp = int(target_time_utc.timestamp() * 1000)
+                else:
+                    await self.send_message(chat_id, "❌ Invalid time format. Use HH:MM:SS (e.g., 18:30:00)")
+                    return
+            except (ValueError, IndexError):
+                await self.send_message(chat_id, "❌ Invalid time format. Use HH:MM:SS (e.g., 18:30:00)")
+                return
         
         try:
             # Calculate start and end timestamps for the date (UTC)
@@ -282,7 +310,7 @@ For support, contact @DecentralizedJM"""
                 "limit": 200
             }
             
-            logger.info(f"Fetching historical funding for {symbol} on {date_display}")
+            logger.info(f"Fetching historical funding for {symbol} on {date_display}" + (f" at {time_str}" if time_str else ""))
             
             async with self.session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status != 200:
@@ -306,36 +334,86 @@ For support, contact @DecentralizedJM"""
                 # Sort by timestamp ascending (oldest first)
                 records.sort(key=lambda x: int(x.get("fundingRateTimestamp", 0)))
                 
-                # Build message
-                lines = [f"📊 <b>{symbol}</b> Historical Funding Rates", f"📅 Date: {date_display}\n"]
-                
-                total_rate = 0
-                for record in records:
-                    rate = float(record.get("fundingRate", 0))
-                    rate_pct = rate * 100
-                    total_rate += rate
-                    timestamp = int(record.get("fundingRateTimestamp", 0))
+                # If time is provided, find the closest settlement at or after the given time
+                if target_time_ist:
+                    matching_record = None
                     
-                    # Format time in IST (DD/MM/YY H:M:S format)
+                    for record in records:
+                        record_timestamp = int(record.get("fundingRateTimestamp", 0))
+                        if record_timestamp >= target_timestamp:
+                            matching_record = record
+                            break
+                    
+                    # If no record found at or after the time, get the last one before it
+                    if not matching_record:
+                        for record in reversed(records):
+                            record_timestamp = int(record.get("fundingRateTimestamp", 0))
+                            if record_timestamp <= target_timestamp:
+                                matching_record = record
+                                break
+                    
+                    if not matching_record:
+                        await self.send_message(chat_id, f"❌ No funding rate found for <b>{symbol}</b> at {time_str} on {date_display}")
+                        return
+                    
+                    # Format single record response
+                    rate = float(matching_record.get("fundingRate", 0))
+                    rate_pct = rate * 100
+                    timestamp = int(matching_record.get("fundingRateTimestamp", 0))
+                    
+                    # Format time in IST
                     dt = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
                     dt_ist = dt + timedelta(hours=5, minutes=30)
-                    time_str = dt_ist.strftime('%d/%m/%y %H:%M:%S')
+                    settlement_time_str = dt_ist.strftime('%d/%m/%y %H:%M:%S')
                     
-                    # Emoji based on rate
                     emoji = "🟢" if rate >= 0 else "🔴"
                     rate_str = f"+{rate_pct:.4f}%" if rate >= 0 else f"{rate_pct:.4f}%"
+                    bias = "Positive (Longs Pay Shorts)" if rate >= 0 else "Negative (Shorts Pay Longs)"
                     
-                    lines.append(f"{emoji} {time_str}: <b>{rate_str}</b>")
-                
-                # Add daily total
-                total_pct = total_rate * 100
-                total_emoji = "🟢" if total_rate >= 0 else "🔴"
-                total_str = f"+{total_pct:.4f}%" if total_rate >= 0 else f"{total_pct:.4f}%"
-                lines.append(f"\n{total_emoji} <b>Daily Total: {total_str}</b>")
-                lines.append(f"📈 Settlements: {len(records)}")
-                
-                await self.send_message(chat_id, "\n".join(lines))
-                logger.info(f"Sent historical funding for {symbol} on {date_display}: {len(records)} records")
+                    message = f"""📊 <b>{symbol}</b> Funding Rate
+
+🕐 Requested: {date_display} {time_str}
+⏰ Settlement: {settlement_time_str}
+
+{emoji} Rate: <b>{rate_str}</b>
+• Bias: {bias}
+
+<i>A Mudrex service</i>"""
+                    
+                    await self.send_message(chat_id, message)
+                    logger.info(f"Sent single funding rate for {symbol} at {settlement_time_str}")
+                    
+                else:
+                    # Build full day message
+                    lines = [f"📊 <b>{symbol}</b> Historical Funding Rates", f"📅 Date: {date_display}\n"]
+                    
+                    total_rate = 0
+                    for record in records:
+                        rate = float(record.get("fundingRate", 0))
+                        rate_pct = rate * 100
+                        total_rate += rate
+                        timestamp = int(record.get("fundingRateTimestamp", 0))
+                        
+                        # Format time in IST (DD/MM/YY H:M:S format)
+                        dt = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
+                        dt_ist = dt + timedelta(hours=5, minutes=30)
+                        time_display = dt_ist.strftime('%d/%m/%y %H:%M:%S')
+                        
+                        # Emoji based on rate
+                        emoji = "🟢" if rate >= 0 else "🔴"
+                        rate_str = f"+{rate_pct:.4f}%" if rate >= 0 else f"{rate_pct:.4f}%"
+                        
+                        lines.append(f"{emoji} {time_display}: <b>{rate_str}</b>")
+                    
+                    # Add daily total
+                    total_pct = total_rate * 100
+                    total_emoji = "🟢" if total_rate >= 0 else "🔴"
+                    total_str = f"+{total_pct:.4f}%" if total_rate >= 0 else f"{total_pct:.4f}%"
+                    lines.append(f"\n{total_emoji} <b>Daily Total: {total_str}</b>")
+                    lines.append(f"📈 Settlements: {len(records)}")
+                    
+                    await self.send_message(chat_id, "\n".join(lines))
+                    logger.info(f"Sent historical funding for {symbol} on {date_display}: {len(records)} records")
                 
         except Exception as e:
             logger.error(f"Error fetching historical funding for {symbol}: {e}")
@@ -377,7 +455,7 @@ For support, contact @DecentralizedJM"""
             lines.append(f"{emoji} <b>{symbol}</b>: {rate_pct:+.4f}%")
         
         lines.append("\n<i>🔴 Longs pay | 🟢 Shorts pay</i>")
-        lines.append("<i>💡 Use /funding SYMBOL DDMMYY for historical rates</i>")
+        lines.append("<i>💡 Use /funding SYMBOL DDMMYY [HH:MM:SS]</i>")
         
         await self.send_message(chat_id, "\n".join(lines))
     
@@ -397,7 +475,8 @@ For support, contact @DecentralizedJM"""
 <b>Commands:</b>
 • /funding - Top 10 extreme rates
 • /funding SYMBOL - Current rate for symbol
-• /funding SYMBOL DDMMYY - Historical rates
+• /funding SYMBOL DDMMYY - Full day historical rates
+• /funding SYMBOL DDMMYY HH:MM:SS - Specific time rate
 
 <i>A Mudrex service</i>"""
         
